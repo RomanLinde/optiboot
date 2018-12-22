@@ -311,7 +311,7 @@ typedef union {
 #include "stk500.h"
 
 #ifndef LED_START_FLASHES
-#define LED_START_FLASHES 0
+#define LED_START_FLASHES 2
 #endif
 
 /* set the UART baud rate defaults */
@@ -514,9 +514,39 @@ void pre_main(void) {
   );
 }
 
+#define ADC_PIN_TACT 2
+
+uint16_t adc_read(uint8_t adcx) {
+	/* adcx is the analog pin we want to use.  ADMUX's first few bits are
+	 * the binary representations of the numbers of the pins so we can
+	 * just 'OR' the pin's number with ADMUX to select that pin.
+	 * We first zero the four bits by setting ADMUX equal to its higher
+	 * four bits. */
+	ADMUX	&=	0xf0;
+	ADMUX	|=	adcx;
+
+	/* This starts the conversion. */
+	ADCSRA |= _BV(ADSC);
+	ADCSRA |= (1<<ADSC); // Start conversion
+	/* This is an idle loop that just wait around until the conversion
+	 * is finished.  It constantly checks ADCSRA's ADSC bit, which we just
+	 * set above, to see if it is still set.  This bit is automatically
+	 * reset (zeroed) when the conversion is ready so if we do this in
+	 * a loop the loop will just go until the conversion is ready. */
+	while ( (ADCSRA & _BV(ADSC)) );	
+
+	/* Finally, we return the converted value to the calling function. */
+	return ADCW;
+}
+
+void runApp() {
+  watchdogConfig(WATCHDOG_OFF);
+	__asm__ __volatile__ ("rjmp optiboot_version+2\n");
+}
 
 /* main program starts here */
-int main(void) {
+int main(void)
+{	
   uint8_t ch;
 
   /*
@@ -546,82 +576,20 @@ int main(void) {
   SP=RAMEND;  // This is done by hardware reset
 #endif
 
-  /*
-   * Protect as much from MCUSR as possible for application
-   * and still skip bootloader if not necessary
-   * 
-   * Code by MarkG55
-   * see discusion in https://github.com/Optiboot/optiboot/issues/97
-   */
-#if defined(__AVR_ATmega8515__) || defined(__AVR_ATmega8535__) ||	\
-    defined(__AVR_ATmega16__)   || defined(__AVR_ATmega162__) ||	\
-    defined (__AVR_ATmega128__)
-  ch = MCUCSR;
-#else
+  /* Enable the ADC */
+	ADCSRA = (1<<ADEN) | (1<<ADPS2) | (1<<ADPS0);
+  uint8_t progMode = adc_read(ADC_PIN_TACT)<200;
+  
   ch = MCUSR;
-#endif
-  // Skip all logic and run bootloader if MCUSR is cleared (application request)
-  if (ch != 0) {
-      /*
-       * To run the boot loader, External Reset Flag must be set.
-       * If not, we could make shortcut and jump directly to application code.
-       * Also WDRF set with EXTRF is a result of Optiboot timeout, so we
-       * shouldn't run bootloader in loop :-) That's why:
-       *  1. application is running if WDRF is cleared
-       *  2. we clear WDRF if it's set with EXTRF to avoid loops
-       * One problematic scenario: broken application code sets watchdog timer 
-       * without clearing MCUSR before and triggers it quickly. But it's
-       * recoverable by power-on with pushed reset button.
-       */
-      if ((ch & (_BV(WDRF) | _BV(EXTRF))) != _BV(EXTRF)) { 
-	  if (ch & _BV(EXTRF)) {
-	      /*
-	       * Clear WDRF because it was most probably set by wdr in bootloader.
-	       * It's also needed to avoid loop by broken application which could
-	       * prevent entering bootloader.
-	       * '&' operation is skipped to spare few bytes as bits in MCUSR
-	       * can only be cleared.
-	       */
-#if defined(__AVR_ATmega8515__) || defined(__AVR_ATmega8535__) ||	\
-    defined(__AVR_ATmega16__)   || defined(__AVR_ATmega162__) ||	\
-    defined(__AVR_ATmega128__)
-               // Fix missing definitions in avr-libc
-	      MCUCSR = ~(_BV(WDRF));
-#else
-	      MCUSR = ~(_BV(WDRF));
-#endif
-	  }
-	  /* 
-	   * save the reset flags in the designated register
-	   * This can be saved in a main program by putting code in .init0 (which
-	   * executes before normal c init code) to save R2 to a global variable.
-	   */
-	  __asm__ __volatile__ ("mov r2, %0\n" :: "r" (ch));
-
-	  // switch off watchdog
-	  watchdogConfig(WATCHDOG_OFF);
-	  // Note that appstart_vec is defined so that this works with either
-	  // real or virtual boot partitions.
-	   __asm__ __volatile__ (
-	    // Jump to 'save' or RST vector
-#ifdef VIRTUAL_BOOT_PARTITION
-	    // full code version for virtual boot partition
-	    "ldi r30,%[rstvec]\n"
-	    "clr r31\n"
-	    "ijmp\n"::[rstvec] "M"(appstart_vec)
-#else
-#ifdef RAMPZ
-	    // use absolute jump for devices with lot of flash
-	    "jmp 0\n"::
-#else
-	    // use rjmp to go around end of flash to address 0
-	    // it uses fact that optiboot_version constant is 2 bytes before end of flash
-	    "rjmp optiboot_version+2\n"
-#endif //RAMPZ
-#endif //VIRTUAL_BOOT_PARTITION
-	  );
-      }
-  }
+         
+  uint8_t byPoweron = (ch & _BV(PORF)) == _BV(PORF);
+  uint8_t byWatchdog = (ch & _BV(WDRF)) == _BV(WDRF);
+  
+  if (!(byPoweron & (progMode | byWatchdog))) {       
+    if (ch & _BV(EXTRF))
+      MCUSR = ~(_BV(WDRF));
+	   runApp();
+  }  
 
 #if LED_START_FLASHES > 0
   // Set up Timer 1 for timeout counter
@@ -900,14 +868,16 @@ int main(void) {
     else if (ch == STK_LEAVE_PROGMODE) { /* 'Q' */
       // Adaboot no-wait mod
       watchdogConfig(WATCHDOG_16MS);
-      verifySpace();
+      MCUSR = ~(_BV(PORF));      
+      verifySpace();      
+      //runApp();  
     }
     else {
       // This covers the response to commands like STK_ENTER_PROGMODE
       verifySpace();
     }
     putch(STK_OK);
-  }
+  }  
 }
 
 void putch(char ch) {

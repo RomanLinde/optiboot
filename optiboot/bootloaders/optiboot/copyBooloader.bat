@@ -1,0 +1,1 @@
+copy optiboot_atmega644p.hex "C:\Users\rlind\AppData\Local\Arduino15\packages\MightyCore\hardware\avr\2.0.1\bootloaders\optiboot_flash\atmega644p\16000000L\optiboot_flash_atmega644p_UART0_115200_16000000L.hex"

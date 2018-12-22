@@ -160,7 +160,7 @@
     || defined(__AVR_ATmega1284P__)
 /*------------------------------------------------------------------------ */
 #if !defined(LED)
-#define LED         B0
+#define LED         B3
 #endif
 
 #if     defined(__AVR_ATmega8535__)	\

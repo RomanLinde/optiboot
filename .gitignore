@@ -1,0 +1,5 @@
+
+*.hex
+*.lst
+optiboot/bootloaders/optiboot/optiboot_atmega644p.lst
+optiboot/bootloaders/optiboot/optiboot_atmega644p.hex
